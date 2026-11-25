@@ -69,7 +69,8 @@ const reportingFields: ReportingField[] = [
 	{ f: 88, s: [{ f: 1 }, { f: 2, s: [{ f: 1 }] }, { f: 3, s: [{ f: 21 }, { f: 22 }] }] },
 	{ f: 92, s: [{ f: 1, m: true }] },
 	{ f: 93, s: [{ f: 1, m: true }] },
-	{ f: 94, s: [{ f: 1, m: true }] }
+	{ f: 94, s: [{ f: 1, m: true }] },
+	{ f: 134, s: [{ f: 1, m: true }] }
 ]
 
 const compileReportingFields = (fields: readonly ReportingField[]): Map<number, CompiledReportingField> => {

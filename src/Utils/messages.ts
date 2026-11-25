@@ -819,16 +819,20 @@ export const generateWAMessageContent = async (
 			}
 		}
 	} else if (hasNonNullishProperty(message, 'sticker') && hasNonNullishProperty(message, 'audio')) {
+		const stickerMsgInput: AnyMediaMessageContent = {
+			sticker: message.sticker,
+			...(message.isAnimated !== undefined ? { isAnimated: message.isAnimated } : {}),
+			...(message.width !== undefined ? { width: message.width } : {}),
+			...(message.height !== undefined ? { height: message.height } : {}),
+			...(message.mimetype !== undefined ? { mimetype: message.mimetype } : {})
+		}
+		const audioMsgInput: AnyMediaMessageContent = {
+			audio: message.audio,
+			mimetype: (message as { audioMimetype?: string }).audioMimetype || 'audio/ogg; codecs=opus'
+		}
 		const [stickerResult, audioResult] = await Promise.all([
-			prepareWAMessageMedia(message, options),
-			prepareWAMessageMedia(
-				{
-					audio: message.audio,
-					mimetype: (message as { audioMimetype?: string }).audioMimetype || 'audio/ogg; codecs=opus',
-					ptt: false
-				},
-				options
-			)
+			prepareWAMessageMedia(stickerMsgInput, options),
+			prepareWAMessageMedia(audioMsgInput, options)
 		])
 		if (stickerResult.stickerMessage && audioResult.audioMessage) {
 			stickerResult.stickerMessage.soundVersion = 0
