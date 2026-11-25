@@ -1845,6 +1845,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		}
 	}
 
+	const handleStatus = async (node: BinaryNode) => {
+		await sendMessageAck(node).catch(ackErr => logger.error({ ackErr }, 'failed to ack status'))
+	}
+
 	const handleBadAck = async ({ attrs }: BinaryNode) => {
 		const key: WAMessageKey = { remoteJid: attrs.from, fromMe: true, id: attrs.id }
 
@@ -1953,7 +1957,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 			['message', handleMessage],
 			['call', handleCall],
 			['receipt', handleReceipt],
-			['notification', handleNotification]
+			['notification', handleNotification],
+			['status', handleStatus]
 		]),
 		{
 			isWsOpen: () => ws.isOpen,
@@ -2010,6 +2015,9 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
 	ws.on('CB:notification', async (node: BinaryNode) => {
 		await processNode('notification', node, 'handling notification', handleNotification)
+	})
+	ws.on('CB:status', async (node: BinaryNode) => {
+		await processNode('status', node, 'handling status', handleStatus)
 	})
 	ws.on('CB:ack,class:message', (node: BinaryNode) => {
 		handleBadAck(node).catch(error => onUnexpectedError(error, 'handling bad ack'))

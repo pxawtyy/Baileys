@@ -1,5 +1,6 @@
 import { Boom } from '@hapi/boom'
 import { randomBytes } from 'crypto'
+import { gzipSync, zip } from 'fflate'
 import { promises as fs } from 'fs'
 import { type Transform } from 'stream'
 import { proto } from '../../WAProto/index.js'
@@ -37,8 +38,11 @@ import {
 	generateThumbnail,
 	getAudioDuration,
 	getAudioWaveform,
+	getImageProcessingLibrary,
 	getRawMediaUploadData,
-	type MediaDownloadOptions
+	getStream,
+	type MediaDownloadOptions,
+	toBuffer
 } from './messages-media'
 import { shouldIncludeReportingToken } from './reporting-utils'
 
@@ -392,6 +396,211 @@ function hasOptionalProperty<T, K extends PropertyKey>(obj: T, key: K): obj is W
 	return typeof obj === 'object' && obj !== null && key in obj && (obj as any)[key] !== null
 }
 
+function isAnimatedWebP(buffer: Buffer) {
+	if (
+		buffer.length < 12 ||
+		buffer[0] !== 0x52 ||
+		buffer[1] !== 0x49 ||
+		buffer[2] !== 0x46 ||
+		buffer[3] !== 0x46 ||
+		buffer[8] !== 0x57 ||
+		buffer[9] !== 0x45 ||
+		buffer[10] !== 0x42 ||
+		buffer[11] !== 0x50
+	) {
+		return false
+	}
+
+	let offset = 12
+	while (offset < buffer.length - 8) {
+		const chunkFourCC = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength).toString(
+			'ascii',
+			offset,
+			offset + 4
+		)
+		const chunkSize = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength).readUInt32LE(offset + 4)
+		if (chunkFourCC === 'VP8X') {
+			const flagsOffset = offset + 8
+			if (flagsOffset < buffer.length && buffer[flagsOffset]! & 0x02) return true
+		} else if (chunkFourCC === 'ANIM' || chunkFourCC === 'ANMF') {
+			return true
+		}
+		offset += 8 + chunkSize + (chunkSize % 2)
+	}
+	return false
+}
+
+function isWebPBuffer(buffer: Buffer) {
+	return (
+		buffer.length >= 12 &&
+		buffer[0] === 0x52 &&
+		buffer[1] === 0x49 &&
+		buffer[2] === 0x46 &&
+		buffer[3] === 0x46 &&
+		buffer[8] === 0x57 &&
+		buffer[9] === 0x45 &&
+		buffer[10] === 0x42 &&
+		buffer[11] === 0x50
+	)
+}
+
+export async function prepareStickerPackMessage(
+	stickerPack: {
+		stickers: Array<{ data: WAMediaUpload; emojis?: string[]; accessibilityLabel?: string }>
+		cover: WAMediaUpload
+		name: string
+		publisher: string
+		description?: string
+		packId?: string
+	},
+	options: MessageContentGenerationOptions
+) {
+	const { stickers, name, publisher, packId, description } = stickerPack
+	if (stickers.length > 60) {
+		throw new Boom('Sticker pack exceeds the maximum limit of 60 stickers', { statusCode: 400 })
+	}
+	if (stickers.length === 0) {
+		throw new Boom('Sticker pack must contain at least one sticker', { statusCode: 400 })
+	}
+
+	const stickerPackIdValue = packId || generateMessageIDV2()
+	const lib = await getImageProcessingLibrary()
+	const stickerData: Record<string, [Uint8Array, { level: 0 }]> = {}
+
+	const stickerPromises = stickers.map(async (s, i) => {
+		const { stream } = await getStream(s.data)
+		const buffer = await toBuffer(stream)
+		let finalBuffer: Buffer
+		let isAnimated = false
+		let isLottie = false
+		let mimetype = 'image/webp'
+		let extension = '.webp'
+
+		const isGzip = buffer.length > 2 && buffer[0] === 0x1f && buffer[1] === 0x8b
+		const isRawJson = buffer.length > 0 && buffer[0] === 0x7b
+
+		if (isGzip) {
+			finalBuffer = buffer
+			isLottie = true
+			mimetype = 'application/was'
+			extension = '.was'
+		} else if (isRawJson) {
+			finalBuffer = Buffer.from(gzipSync(buffer))
+			isLottie = true
+			mimetype = 'application/was'
+			extension = '.was'
+		} else if (isWebPBuffer(buffer)) {
+			finalBuffer = buffer
+			isAnimated = isAnimatedWebP(buffer)
+		} else if (lib && 'sharp' in lib && lib.sharp) {
+			finalBuffer = await lib.sharp.default(buffer)
+				.resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+				.webp()
+				.toBuffer()
+			isAnimated = false
+		} else {
+			throw new Boom('No image processing library available for sticker conversion.')
+		}
+
+		if (finalBuffer.length > 1024 * 1024) {
+			throw new Boom(`Sticker at index ${i} exceeds 1MB`, { statusCode: 400 })
+		}
+
+		const hash = sha256(Buffer.from(finalBuffer)).toString('base64').replace(/\//g, '-')
+		const fileName = `${hash}${extension}`
+		stickerData[fileName] = [new Uint8Array(finalBuffer), { level: 0 }]
+
+		const metadata: proto.Message.StickerPackMessage.ISticker = {
+			fileName,
+			mimetype,
+			isAnimated,
+			emojis: s.emojis || [],
+			accessibilityLabel: s.accessibilityLabel
+		}
+		if (isLottie) metadata.isLottie = true
+		return metadata
+	})
+
+	const stickerMetadata = await Promise.all(stickerPromises)
+	const trayIconFileName = `${stickerPackIdValue}.png`
+	const { stream: coverStream } = await getStream(stickerPack.cover)
+	const coverBuffer = await toBuffer(coverStream)
+	let coverPngBuffer: Buffer
+
+	if (lib && 'sharp' in lib && lib.sharp) {
+		coverPngBuffer = await lib.sharp.default(coverBuffer)
+			.resize(96, 96, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+			.png()
+			.toBuffer()
+	} else {
+		throw new Boom('Sharp is required for cover conversion.')
+	}
+
+	stickerData[trayIconFileName] = [new Uint8Array(coverPngBuffer), { level: 0 }]
+	const zipBuffer = await new Promise<Buffer>((resolve, reject) => {
+		zip(stickerData, (err: Error | null, data: Uint8Array) => {
+			if (err) reject(err)
+			else resolve(Buffer.from(data))
+		})
+	})
+
+	const stickerPackUpload = await encryptedStream(zipBuffer, 'sticker-pack', {
+		logger: options.logger,
+		opts: options.options
+	})
+	const stickerPackUploadResult = await options.upload(stickerPackUpload.encFilePath, {
+		fileEncSha256B64: stickerPackUpload.fileEncSha256.toString('base64'),
+		mediaType: 'sticker-pack',
+		timeoutMs: options.mediaUploadTimeoutMs
+	})
+
+	await fs.unlink(stickerPackUpload.encFilePath)
+
+	const stickerPackMessage: proto.Message.IStickerPackMessage = {
+		name,
+		publisher,
+		stickerPackId: stickerPackIdValue,
+		packDescription: description,
+		stickerPackOrigin: WAProto.Message.StickerPackMessage.StickerPackOrigin.USER_CREATED,
+		stickerPackSize: zipBuffer.length,
+		stickers: stickerMetadata,
+		fileSha256: stickerPackUpload.fileSha256,
+		fileEncSha256: stickerPackUpload.fileEncSha256,
+		mediaKey: stickerPackUpload.mediaKey,
+		directPath: stickerPackUploadResult.directPath,
+		fileLength: stickerPackUpload.fileLength,
+		mediaKeyTimestamp: unixTimestampSeconds(),
+		trayIconFileName
+	}
+
+	try {
+		const thumbnailBuffer = await lib.sharp.default(coverBuffer).resize(252, 252).jpeg().toBuffer()
+		const thumbUpload = await encryptedStream(thumbnailBuffer, 'thumbnail-sticker-pack', {
+			logger: options.logger,
+			opts: options.options
+		})
+		const thumbUploadResult = await options.upload(thumbUpload.encFilePath, {
+			fileEncSha256B64: thumbUpload.fileEncSha256.toString('base64'),
+			mediaType: 'thumbnail-sticker-pack',
+			timeoutMs: options.mediaUploadTimeoutMs
+		})
+		await fs.unlink(thumbUpload.encFilePath)
+
+		Object.assign(stickerPackMessage, {
+			thumbnailDirectPath: thumbUploadResult.directPath,
+			thumbnailSha256: thumbUpload.fileSha256,
+			thumbnailEncSha256: thumbUpload.fileEncSha256,
+			thumbnailHeight: 252,
+			thumbnailWidth: 252,
+			imageDataHash: sha256(thumbnailBuffer).toString('base64')
+		})
+	} catch (e) {
+		options.logger?.warn?.(`Thumbnail generation failed: ${e}`)
+	}
+
+	return { stickerPackMessage }
+}
+
 export const generateWAMessageContent = async (
 	message: AnyMessageContent,
 	options: MessageContentGenerationOptions
@@ -516,6 +725,8 @@ export const generateWAMessageContent = async (
 	} else if (hasOptionalProperty(message, 'ptv') && message.ptv) {
 		const { videoMessage } = await prepareWAMessageMedia({ video: message.video }, options)
 		m.ptvMessage = videoMessage
+	} else if ('stickerPack' in message) {
+		m = await prepareStickerPackMessage(message.stickerPack, options)
 	} else if (hasNonNullishProperty(message, 'product')) {
 		const { imageMessage } = await prepareWAMessageMedia({ image: message.product.productImage }, options)
 		m.productMessage = WAProto.Message.ProductMessage.create({
@@ -606,6 +817,29 @@ export const generateWAMessageContent = async (
 				limitSharingSettingTimestamp: Date.now(),
 				initiatedByMe: true
 			}
+		}
+	} else if (hasNonNullishProperty(message, 'sticker') && hasNonNullishProperty(message, 'audio')) {
+		const [stickerResult, audioResult] = await Promise.all([
+			prepareWAMessageMedia(message, options),
+			prepareWAMessageMedia(
+				{
+					audio: message.audio,
+					mimetype: (message as { audioMimetype?: string }).audioMimetype || 'audio/ogg; codecs=opus',
+					ptt: false
+				},
+				options
+			)
+		])
+		if (stickerResult.stickerMessage && audioResult.audioMessage) {
+			stickerResult.stickerMessage.soundVersion = 0
+			const soundEmoji = (message as { soundEmoji?: string }).soundEmoji
+			if (soundEmoji) {
+				stickerResult.stickerMessage.soundEmoji = Buffer.from(soundEmoji, 'utf8')
+			}
+			stickerResult.stickerMessage.audio = audioResult.audioMessage
+			m = { soundStickerMessage: { message: stickerResult } }
+		} else {
+			m = stickerResult
 		}
 	} else {
 		m = await prepareWAMessageMedia(message, options)
@@ -812,7 +1046,8 @@ export const normalizeMessageContent = (content: WAMessageContent | null | undef
 			message?.editedMessage ||
 			message?.associatedChildMessage ||
 			message?.groupStatusMessage ||
-			message?.groupStatusMessageV2
+			message?.groupStatusMessageV2 ||
+			message?.soundStickerMessage
 		)
 	}
 }

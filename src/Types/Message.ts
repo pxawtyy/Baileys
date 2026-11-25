@@ -199,6 +199,9 @@ export type AnyMediaMessageContent = (
 	| ({
 			sticker: WAMediaUpload
 			isAnimated?: boolean
+			audio?: WAMediaUpload
+			audioMimetype?: string
+			soundEmoji?: string
 	  } & WithDimensions)
 	| ({
 			document: WAMediaUpload
@@ -210,6 +213,21 @@ export type AnyMediaMessageContent = (
 		/** key of the parent albumMessage to associate this media with */
 		albumParentKey?: WAMessageKey
 	}
+
+export type Sticker = {
+	data: WAMediaUpload
+	emojis?: string[]
+	accessibilityLabel?: string
+}
+
+export type StickerPack = {
+	stickers: Sticker[]
+	cover: WAMediaUpload
+	name: string
+	publisher: string
+	description?: string
+	packId?: string
+}
 
 export type ButtonReplyInfo = {
 	displayText: string
@@ -274,6 +292,9 @@ export type AnyRegularMessageContent = (
 			 * 24 hours, 7 days, 30 days
 			 */
 			time?: 86400 | 604800 | 2592000
+	  }
+	| {
+			stickerPack: StickerPack
 	  }
 	| {
 			product: WASendableProduct
