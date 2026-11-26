@@ -256,6 +256,7 @@ describe('Identity Change Handling', () => {
 			const onBeforeSessionRefresh = jest.fn()
 
 			// no session
+			mockHasSessionRecord.mockResolvedValueOnce(false)
 			mockValidateSession.mockResolvedValue({ exists: false })
 			await handleIdentityChange(createIdentityChangeNode('a@s.whatsapp.net'), {
 				...createContext(),

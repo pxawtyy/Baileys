@@ -126,7 +126,6 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		resyncAppState,
 		onUnexpectedError,
 		assertSessions,
-		invalidateCachedSessions,
 		sendNode,
 		relayMessage,
 		sendReceipt,
@@ -823,13 +822,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 				meLid: authState.creds.me?.lid,
 				validateSession: signalRepository.validateSession,
 				hasSessionRecord,
-				deleteSession: async jids => {
-					try {
-						await signalRepository.deleteSession(jids)
-					} finally {
-						invalidateCachedSessions(jids)
-					}
-				},
+				deleteSession: signalRepository.deleteSession,
 				assertSessions,
 				debounceCache: identityAssertDebounce,
 				isOfflineResumeComplete,
