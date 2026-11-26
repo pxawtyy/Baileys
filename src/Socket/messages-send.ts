@@ -124,7 +124,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 	/** Per-socket media host; updated whenever media_conn is fetched. Defaults to the public WhatsApp host. */
 	let mediaHost: string = DEF_MEDIA_HOST
 	const refreshMediaConn = async (forceGet = false): Promise<MediaConnInfo> => {
-		const media = await mediaConn
+		const media = await mediaConn?.catch(() => undefined)
 		if (!media || forceGet || new Date().getTime() - media.fetchDate.getTime() > media.ttl * 1000) {
 			mediaConn = (async () => {
 				const result = await query({
